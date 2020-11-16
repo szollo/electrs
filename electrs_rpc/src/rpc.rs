@@ -23,7 +23,7 @@ use electrs_index::{
             hex::{FromHex, ToHex},
             hex_fmt_impl, index_impl, serde_impl, sha256, Hash,
         },
-        BlockHash, Transaction, TxMerkleNode, Txid,
+        BlockHash, OutPoint, Transaction, TxMerkleNode, Txid,
     },
     Confirmed, Daemon, Histogram, Index, Metrics, ScriptHash,
 };
@@ -591,6 +591,57 @@ impl Rpc {
         Ok(json!([server_id, PROTOCOL_VERSION]))
     }
 
+    fn outpoint_subscribe(&self, (txid, vout): (Txid, u32)) -> Result<Value> {
+        let confirmed = self.transaction_get_confirmed(&txid)?;
+        let mempool = self.mempool.read().unwrap();
+        let unconfirmed = mempool.get(&txid);
+        let funding = OutPoint { txid, vout };
+
+        let (tx, height): (&Transaction, usize) = match (&confirmed, unconfirmed) {
+            (Some(c), _) => (&c.tx, c.height),
+            (None, Some(u)) => (&u.tx, 0),
+            (None, None) => return Ok(json!({})),
+        };
+
+        let scripthash: ScriptHash = match tx.output.get(vout as usize) {
+            Some(txo) => ScriptHash::new(&txo.script_pubkey),
+            None => bail!("no output #{} in {}", vout, txid),
+        };
+
+        let txids: Vec<(Txid, usize)> = self
+            .index
+            .lookup_by_scripthash(&scripthash, &self.daemon)?
+            .readers
+            .into_par_iter()
+            .filter_map(|r| {
+                let result = r.read();
+                match result {
+                    Ok(confirmed) if is_spending(&confirmed.tx, funding) => {
+                        Some(Ok((confirmed.txid, confirmed.height)))
+                    }
+                    Ok(confirmed) => {
+                        trace!("{:?} does not spend {}", confirmed, funding);
+                        None
+                    }
+                    Err(e) => Some(Err(e.context("failed to read tx"))),
+                }
+            })
+            .collect::<Result<_>>()
+            .context("transaction reading failed")?;
+        if !txids.is_empty() {
+            return Ok(outpoint_spent_value(funding, height, txids));
+        }
+
+        let txids: Vec<(Txid, usize)> = mempool
+            .lookup(scripthash)
+            .iter()
+            .filter(|e| is_spending(&e.tx, funding))
+            .map(|e| (e.txid, 0))
+            .collect();
+
+        Ok(outpoint_spent_value(funding, height, txids))
+    }
+
     pub(crate) fn handle_request(&self, sub: &mut Subscription, value: Value) -> Result<Value> {
         let rpc_duration = self.stats.rpc_duration.clone();
         let req_str = value.to_string();
@@ -623,6 +674,7 @@ impl Rpc {
                 "blockchain.estimatefee" => self.estimate_fee(from_value(params)?),
                 "blockchain.headers.subscribe" => self.headers_subscribe(sub),
                 "blockchain.relayfee" => self.relayfee(),
+                "blockchain.outpoint.subscribe" => self.outpoint_subscribe(from_value(params)?),
                 "mempool.get_fee_histogram" => self.get_fee_histogram(),
                 "server.ping" => Ok(Value::Null),
                 "server.version" => self.version(from_value(params)?),
@@ -663,6 +715,22 @@ fn create_merkle_branch<T: Hash>(mut hashes: Vec<T>, mut index: usize) -> Vec<T>
             .collect()
     }
     result
+}
+
+fn is_spending(tx: &Transaction, funding: OutPoint) -> bool {
+    tx.input.iter().any(|txi| txi.previous_output == funding)
+}
+
+fn outpoint_spent_value(funding: OutPoint, height: usize, spending: Vec<(Txid, usize)>) -> Value {
+    if spending.len() > 1 {
+        panic!("double spend of {}: {:?}", funding, spending);
+    }
+    match spending.into_iter().next() {
+        Some((spender_txid, spender_height)) => {
+            json!({"height": height, "spender_txhash": spender_txid, "spender_height": spender_height})
+        }
+        None => json!({ "height": height }),
+    }
 }
 
 #[cfg(test)]
