@@ -6,7 +6,11 @@ RUN apt-get update \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
-RUN adduser --disabled-login --system --shell /bin/false --uid 1000 user
+ARG USER_ID
+ARG GROUP_ID
+
+RUN addgroup --gid $GROUP_ID user
+RUN adduser --disabled-login --system --shell /bin/false --uid $USER_ID --gid $GROUP_ID user
 
 USER user
 WORKDIR /home/user
@@ -21,3 +25,4 @@ EXPOSE 50001
 EXPOSE 4224
 
 STOPSIGNAL SIGINT
+
