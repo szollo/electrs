@@ -1,12 +1,11 @@
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
+use bitcoin::hashes::hex::ToHex;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
-use bitcoin_hashes::hex::ToHex;
-use bitcoin_hashes::Hash;
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
+use bitcoin::hashes::Hash;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -126,14 +125,12 @@ impl Status {
         if txns.is_empty() {
             None
         } else {
-            let mut hash = FullHash::default();
             let mut sha2 = Sha256::new();
             for item in txns {
                 let part = format!("{}:{}:", item.tx_hash.to_hex(), item.height);
-                sha2.input(part.as_bytes());
+                sha2.update(part.as_bytes());
             }
-            sha2.result(&mut hash);
-            Some(hash)
+            Some(sha2.finalize().into())
         }
     }
 }
@@ -429,6 +426,11 @@ impl Query {
         self.app
             .daemon()
             .gettransaction_raw(tx_hash, blockhash, verbose)
+    }
+
+    pub fn get_confirmed_blockhash(&self, tx_hash: &Txid) -> Result<Value> {
+        let blockhash = self.lookup_confirmed_blockhash(tx_hash, None)?;
+        Ok(json!({ "block_hash": blockhash }))
     }
 
     pub fn get_headers(&self, heights: &[usize]) -> Vec<HeaderEntry> {

@@ -1,7 +1,7 @@
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode::{deserialize, serialize};
-use bitcoin_hashes::hex::{FromHex, ToHex};
-use bitcoin_hashes::{sha256d::Hash as Sha256dHash, Hash};
+use bitcoin::hashes::hex::{FromHex, ToHex};
+use bitcoin::hashes::{sha256d::Hash as Sha256dHash, Hash};
 use error_chain::ChainedError;
 use serde_json::{from_str, Value};
 use std::collections::HashMap;
@@ -108,7 +108,26 @@ impl Connection {
         Ok(result)
     }
 
-    fn server_version(&self) -> Result<Value> {
+    fn server_version(&self, params: &[Value]) -> Result<Value> {
+        if params.len() != 2 {
+            bail!("invalid params: {:?}", params);
+        }
+        let client_id = params[0]
+            .as_str()
+            .chain_err(|| format!("invalid client_id: {:?}", params[0]))?;
+        // TODO: support (min, max) protocol version limits
+        let client_version = params[1]
+            .as_str()
+            .chain_err(|| format!("invalid client_version: {:?}", params[1]))?;
+
+        if client_version != PROTOCOL_VERSION {
+            bail!(
+                "{} requested protocol version {}, server supports {}",
+                client_id,
+                client_version,
+                PROTOCOL_VERSION
+            );
+        }
         Ok(json!([
             format!("electrs {}", ELECTRS_VERSION),
             PROTOCOL_VERSION
@@ -267,6 +286,11 @@ impl Connection {
         Ok(self.query.get_transaction(&tx_hash, verbose)?)
     }
 
+    fn blockchain_transaction_get_confirmed_blockhash(&self, params: &[Value]) -> Result<Value> {
+        let tx_hash = hash_from_value(params.get(0)).chain_err(|| "bad tx_hash")?;
+        self.query.get_confirmed_blockhash(&tx_hash)
+    }
+
     fn blockchain_transaction_get_merkle(&self, params: &[Value]) -> Result<Value> {
         let tx_hash = hash_from_value(params.get(0)).chain_err(|| "bad tx_hash")?;
         let height = usize_from_value(params.get(1), "height")?;
@@ -318,6 +342,9 @@ impl Connection {
             "blockchain.transaction.broadcast" => self.blockchain_transaction_broadcast(&params),
             "blockchain.transaction.get" => self.blockchain_transaction_get(&params),
             "blockchain.transaction.get_merkle" => self.blockchain_transaction_get_merkle(&params),
+            "blockchain.transaction.get_confirmed_blockhash" => {
+                self.blockchain_transaction_get_confirmed_blockhash(&params)
+            }
             "blockchain.transaction.id_from_pos" => {
                 self.blockchain_transaction_id_from_pos(&params)
             }
@@ -326,7 +353,7 @@ impl Connection {
             "server.donation_address" => self.server_donation_address(),
             "server.peers.subscribe" => self.server_peers_subscribe(),
             "server.ping" => Ok(Value::Null),
-            "server.version" => self.server_version(),
+            "server.version" => self.server_version(params),
             &_ => bail!("unknown method {} {:?}", method, params),
         };
         timer.observe_duration();
